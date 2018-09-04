@@ -1,0 +1,48 @@
+$SplunkHost="XXX.XXX.XXX.XXX"
+$SplunkEventCollectorPort ="8088"
+$SplunkEventCollectorToken="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+$TenantCredentials = Get-AutomationPSCredential -Name "Exchange"
+# Remove any existing Exchange Online sessions
+Get-PSSession  | ?{$_.ComputerName -like "*.office365.com"} | Remove-PSSession | out-null
+
+# Create a new Exchange Online session
+$Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri https://outlook.office365.com/powershell-liveid/ -Credential $TenantCredentials -Authentication Basic -AllowRedirection
+Import-PSSession $Session -DisableNameChecking -AllowClobber | out-null
+Connect-AzureAD -Credential $TenantCredentials
+
+# Get all AzureADUsers
+$UserList = Get-AzureADUser -All $true
+
+# Append mailbox usage statistics to user information
+$OutputArray = @()
+Foreach($User in $UserList)
+    {
+    $totalsize = ([string](Get-MailboxStatistics -Identity $User.UserPrincipalName).Totalitemsize.value).split(" ")[0]
+    $totaldeletedsize = ([string](Get-MailboxStatistics -Identity $User.UserPrincipalName).TotalDeletedItemSize.value).split(" ")[0]
+    $Lastloggedondate = (Get-MailboxStatistics -Identity $User.UserPrincipalName).LastLogonTime
+    $MailObject = "" | Select DisplayName, JobTitle, Department, PhysicalDeliveryOfficeName, StreetAddress, UserPrincipalName, TotalSize, TotalDeletedSize, LastLoggedOnDate
+    $MailObject.DisplayName = $User.DisplayName
+    $MailObject.JobTitle = $User.JobTitle
+    $MailObject.Department = $User.Department
+    $MailObject.PhysicalDeliveryOfficeName = $User.PhysicalDeliveryOfficeName
+    $MailObject.StreetAddress = $User.StreetAddress
+    $MailObject.UserPrincipalName = $User.UserPrincipalName
+    $MailObject.TotalSize = $totalsize
+    $MailObject.TotalDeletedSize = $totaldeletedsize
+    $MailObject.LastLoggedOnDate = $Lastloggedondate
+    $OutputArray += $MailObject
+    $MailObject = $null
+    }
+Get-PSSession | ?{$_.ComputerName -like "*.office365.com"} | Remove-PSSession | out-null
+
+# Throw events to Splunk HTTP Event Collector in JSON format
+foreach ($m in $OutputArray) {
+    $body = @{
+        event =(ConvertTo-Json $m)
+        sourcetype="exchange:mailbox"
+    }
+    $uri = "http://" + $SplunkHost + ":" + $SplunkEventCollectorPort + "/services/collector"
+    $header = @{"Authorization"="Splunk " + $SplunkEventCollectorToken}
+
+    Invoke-RestMethod -Method Post -Uri $uri -Body (ConvertTo-Json $body) -Header $header
+ }
